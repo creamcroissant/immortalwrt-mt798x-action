@@ -10,24 +10,26 @@
 # See /LICENSE for more information.
 #
 
-name: jcg-q30 immortalwrt-mt798x Builder
+name: immortalwrt-mt7981-rax3000m without_docker Builder
 
 on:
   repository_dispatch:
   workflow_dispatch:
   watch:
     types: started
+  schedule:
+    - cron: "0 21 * * *"  # UTC 时间 21:00，对应北京时间 05:00
 
 env:
   REPO_URL: https://github.com/hanwckf/immortalwrt-mt798x
   REPO_BRANCH: openwrt-21.02
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: mt7981-jcg-q30.config
+  CONFIG_FILE: cmcc_rax3000m_emmc|nand_without_docker.config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
-  UPLOAD_RELEASE: false
+  UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
 
 jobs:
@@ -51,6 +53,16 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
+    - name: Free disk space
+      run: |
+        echo "Before cleanup:"
+        df -h
+        sudo rm -rf /opt/* /usr/local/* /home/linuxbrew
+        sudo apt-get autoremove -y
+        sudo apt-get clean
+        docker system prune -a -f
+        echo "After cleanup:"
+        df -h
 
     - name: Clone source code
       working-directory: /workdir
@@ -70,7 +82,10 @@ jobs:
       run: cd openwrt && ./scripts/feeds update -a
 
     - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
+      run: |
+          cd openwrt && ./scripts/feeds install -a
+          git clone https://github.com/ntlf9t/luci-app-easymesh.git package/feeds/luci/luci-app-easymesh
+          git clone https://github.com/rufengsuixing/luci-app-adguardhome.git package/feeds/luci/luci-app-adguardhome
 
     - name: Load custom configuration
       run: |
@@ -97,6 +112,7 @@ jobs:
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        SAFE_NAME=$(echo $DEVICE_NAME | tr '-' '_')  # 把 "-" 替换成 "_"
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
@@ -131,9 +147,9 @@ jobs:
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")_without_docker" >> $GITHUB_OUTPUT
         touch release.txt
-        [ ${UPLOAD_GOFILE} = true && ${{ steps.gofile.outputs.url }} ] && echo "🔗 [GoFile](${{ steps.gofile.outputs.url }})" >> release.txt
+        echo "📦 OpenWrt 固件自动编译完成" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
@@ -144,7 +160,7 @@ jobs:
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
+        files: ${{ env.FIRMWARE }}/**
 
     - name: Delete workflow runs
       uses: Mattraks/delete-workflow-runs@main
