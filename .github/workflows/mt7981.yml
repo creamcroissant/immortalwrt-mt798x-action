@@ -53,6 +53,16 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
+    - name: Free disk space
+      run: |
+        echo "Before cleanup:"
+        df -h
+        sudo rm -rf /opt/* /usr/local/* /home/linuxbrew
+        sudo apt-get autoremove -y
+        sudo apt-get clean
+        docker system prune -a -f
+        echo "After cleanup:"
+        df -h
 
     - name: Clone source code
       working-directory: /workdir
