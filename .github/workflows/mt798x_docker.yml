@@ -10,7 +10,7 @@
 # See /LICENSE for more information.
 #
 
-name: immortalwrt-mt7981-rax3000m Builder
+name: immortalwrt-mt798x_docker Builder
 
 on:
   repository_dispatch:
