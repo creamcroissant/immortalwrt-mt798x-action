@@ -1,6 +1,6 @@
 ## About this fork
 
-本fork使用[p3terx的GIthub Action脚本](https://github.com/P3TERX/Actions-OpenWrt)，编译[hanwckf的immortalwrt-mt7981分支](https://github.com/hanwckf/immortalwrt-mt798x)。用于自用路由器：rax3000m-emmc和rax3000m，加入easymesh,adguardhome等软件
+本fork使用[p3terx的GIthub Action脚本](https://github.com/P3TERX/Actions-OpenWrt)，编译[hanwckf的immortalwrt-mt7981分支](https://github.com/hanwckf/immortalwrt-mt798x)。用于自用路由器：rax3000m-emmc和rax3000m，加入easymesh，adguardhome等软件
 
 ---
 
