@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
   watch:
     types: started
-  schedule:
+  #schedule:
   #  - cron: "0 21 * * *"  # UTC 时间 21:00，对应北京时间 05:00
 
 env:
