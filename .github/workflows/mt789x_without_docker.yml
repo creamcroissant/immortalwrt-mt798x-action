@@ -13,12 +13,10 @@
 name: immortalwrt-mt798x without_docker Builder
 
 on:
-  repository_dispatch:
-  workflow_dispatch:
-  watch:
-    types: started
-  schedule:
-    - cron: "0 21 * * *"  # UTC 时间 21:00，对应北京时间 05:00
+  push:
+    branches:
+      - main
+  pull_request:
 
 env:
   REPO_URL: https://github.com/hanwckf/immortalwrt-mt798x
