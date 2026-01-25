@@ -1,7 +1,7 @@
 #
 # https://github.com/P3TERX/Actions-OpenWrt
 #
-# Updated: LinkEase Architecture Fix + v2ray-geodata 404 Fix + Runner Stability Fix
+# Updated: LinkEase Fix + GeoData Fix + Runner Stability + ENV Format Fix
 #
 
 name: immortalwrt-mt798x without_docker Builder
@@ -36,12 +36,9 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        # 移除了会导致 proc error 的 docker prune 命令，使用更稳健的清理方式
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
-        
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
-        
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
@@ -52,13 +49,9 @@ jobs:
       run: |
         echo "Before cleanup:"
         df -h
-        # ⚠️ 关键修正：移除了 'docker system prune'，它是导致 ENOENT stat /proc 的元凶
-        # 仅删除已知的占据空间且不影响编译的巨型目录
         sudo rm -rf /opt/* /usr/local/* /home/linuxbrew >> /dev/null 2>&1 || true
-        # 强行清理 apt 缓存
         sudo apt-get autoremove -y > /dev/null 2>&1 || true
         sudo apt-get clean > /dev/null 2>&1 || true
-        
         echo "After cleanup:"
         df -h
 
@@ -83,20 +76,19 @@ jobs:
       run: |
           cd openwrt && ./scripts/feeds install -a
           
-          # [必须保留] 修复官方 v2ray-geodata 404 问题
+          # Fix v2ray-geodata 404
           rm -rf feeds/packages/net/v2ray-geodata
           echo "Replacing broken v2ray-geodata from feeds..."
           git clone https://github.com/sbwml/v2ray-geodata package/v2ray-geodata
 
-          # 常规三方 LuCI
+          # Load Custom LuCI
           git clone https://github.com/ntlf9t/luci-app-easymesh.git package/feeds/luci/luci-app-easymesh
           git clone https://github.com/rufengsuixing/luci-app-adguardhome.git package/feeds/luci/luci-app-adguardhome
           git clone https://github.com/linkease/istore.git package/istore
 
-          # [必须保留] LinkEase / QuickStart 终极架构修复逻辑
+          # LinkEase / QuickStart Fixes
           mkdir -p package/custom
 
-          # Clone & Move out from nested structure
           git clone https://github.com/linkease/nas-packages.git tmp_nas
           git clone https://github.com/linkease/nas-packages-luci.git tmp_nas_luci
           
@@ -107,14 +99,12 @@ jobs:
           
           rm -rf tmp_nas tmp_nas_luci
 
-          # Hardcode Inject Architecture for MT798x (aarch64_cortex-a53)
           for pkg in linkease quickstart luci-app-linkease luci-app-quickstart; do
               MF="package/custom/$pkg/Makefile"
               if [ -f "$MF" ]; then
                  echo "Patching [PKGARCH:=aarch64_cortex-a53] into $pkg..."
                  sed -i '/PKGARCH/d' "$MF"
                  sed -i '1a PKGARCH:=aarch64_cortex-a53' "$MF"
-                 # 移除不存在的 strong dependency，防止报错中止
                  sed -i 's/+linkmount//g' "$MF"
               fi
           done
@@ -126,7 +116,6 @@ jobs:
         chmod +x $DIY_P2_SH
         
         cd openwrt
-        # 强制开启相关包配置
         echo "CONFIG_v2ray-geodata=y" >> .config
         echo "CONFIG_PACKAGE_linkease=y" >> .config
         echo "CONFIG_PACKAGE_quickstart=y" >> .config
@@ -149,9 +138,21 @@ jobs:
         echo -e "$(nproc) thread compile"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        SAFE_NAME=$(echo $DEVICE_NAME | tr '-' '_')
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        
+        # --- ⬇️ 修复 ENV 写变量报错的核心部分 ⬇️ ---
+        # 1. 抓取名字，并通过 head -n 1 确保只有一行，防止多行 output 弄崩 GITHUB_ENV
+        TARGET_DEVICE=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | head -n 1)
+        
+        # 2. 将可能的连字符替换为下划线
+        TARGET_DEVICE=${TARGET_DEVICE//-/_}
+        
+        # 3. 如果这里取不到值，给个默认值 Generic，绝对保证脚本不报错，能顺利上传 artifact
+        if [ -n "$TARGET_DEVICE" ]; then
+          echo "DEVICE_NAME=_$TARGET_DEVICE" >> $GITHUB_ENV
+        else
+          echo "DEVICE_NAME=_Generic" >> $GITHUB_ENV
+        fi
+        
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
     - name: Check space usage
@@ -187,8 +188,10 @@ jobs:
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")_without_docker" >> $GITHUB_OUTPUT
         touch release.txt
-        echo "📦 OpenWrt Firmware Built Successfully" >> release.txt
-        echo "• Linkease/Quickstart Fixed" >> release.txt
+        echo "📦 OpenWrt Firmware" >> release.txt
+        # 添加一些状态信息到 release body 防止空 body
+        echo "- LinkEase Fix Applied" >> release.txt
+        echo "- DEVICE: ${{ env.DEVICE_NAME }}\"" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
