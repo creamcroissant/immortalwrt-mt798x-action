@@ -1,8 +1,8 @@
 #
-# 该 Workflow 包含自动上游监视 + 强制固件以极小积构建逻辑
+# 该 Workflow 包含自动上游监视 + 强制固件极小积构建逻辑
 # 
 # 目标：Hanwckf immortalwrt-mt798x (无 Docker 版, 纯净版)
-# 特性：自动化检测更新、强制移除巨型无用包 (Ruby/BTRFS/AdGuard)
+# 特性：自动化检测更新、强制移除巨型无用包 (Ruby/BTRFS/AdGuard)、修复Action语法
 #
 
 name: MT798x Pure Builder (Smart Watch)
@@ -40,9 +40,9 @@ jobs:
     - name: Check Upstream Commit Hash
       id: check_hash
       run: |
-        # 获取上游仓库最新 Commit，无需下载
+        # 获取上游仓库最新 Commit，无需操作文件系统
         COMMITS=$(git ls-remote "$REPO_URL" refs/heads/"$REPO_BRANCH" | awk '{print $1}')
-        echo "Upstream Hash: $COMMITS"
+        echo "Updating upstream hash: $COMMITS"
         echo "commit_hash=$COMMITS" >> $GITHUB_OUTPUT
         echo "$COMMITS" > .upstream_hash
 
@@ -50,16 +50,17 @@ jobs:
       id: cache_check
       uses: actions/cache@v4
       with:
-        paths: .upstream_hash
+        path: .upstream_hash   # ✅ 已修正: 必须使用单数 path
         key: upstream_${{ steps.check_hash.outputs.commit_hash }}
 
     - name: Cancel if No Update
-      # 如果是定时任务 且 上游Hash没变 => 取消构建，显示绿色
+      # 如果是定时任务 且 上游Hash没变 => 取消构建，避免封号 risk
       if: steps.cache_check.outputs.cache-hit == 'true' && github.event_name == 'schedule'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        echo "✅ 上游仓库没有更新，为了节省资源，本次自动跳过。"
+        echo "✅ 上游仓库没有更新 (Hash: ${{ steps.check_hash.outputs.commit_hash }})"
+        echo "为了节省资源，本次自动取消。"
         gh run cancel ${{ github.run_id }}
         gh run watch ${{ github.run_id }}
 
@@ -79,8 +80,6 @@ jobs:
 
     - name: Free disk space
       run: |
-        echo "清理前空间:"
-        df -h
         sudo rm -rf /opt/* /usr/local/* /home/linuxbrew >> /dev/null 2>&1 || true
         sudo apt-get autoremove -y > /dev/null 2>&1 || true
         sudo apt-get clean > /dev/null 2>&1 || true
@@ -138,36 +137,33 @@ jobs:
         
         cd openwrt
         
-        # ⬇️ 无论 .config 原件写得如何，这里进行最后一次“核大杀器级”清洗
+        # ⬇️ 无论 .config 原件写得如何，这里进行最后一次“核大杀器级”清洗 (安全网)
         echo "Running Deep Clean Processor..."
-        
-        # 1. 处死编程语言运行时 (节省 ~20MB)
+        # Ruby全家桶
         sed -i 's/^CONFIG_PACKAGE_ruby.*=y/# CONFIG_PACKAGE_ruby is not set/' .config
-        sed -i 's/^CONFIG_PACKAGE_node.*=y/# CONFIG_PACKAGE_node is not set/' .config
+        sed -i '/CONFIG_PACKAGE_ruby/d' .config
         
-        # 2. 处死 AdGuardHome (节省 ~30MB)
+        # AdGuardHome
         sed -i 's/^CONFIG_PACKAGE_.*adguardhome.*=y/# CONFIG_PACKAGE_luci-app-adguardhome is not set/' .config
         
-        # 3. 处死 BTRFS 内核模块 (节省 ~10MB)
+        # BTRFS
         sed -i 's/^CONFIG_PACKAGE_kmod-fs-btrfs.*=.*/# CONFIG_PACKAGE_kmod-fs-btrfs is not set/' .config
         sed -i 's/^CONFIG_PACKAGE_btrfs-progs.*=.*/# CONFIG_PACKAGE_btrfs-progs is not set/' .config
         
-        # 4. 处死多余容器引擎 (你选了 without_docker 但有些 config 可能会开)
+        # Docker 核心
         sed -i 's/^CONFIG_PACKAGE_.*containerd.*=y/# CONFIG_PACKAGE_containerd is not set/' .config
         
-        # 5. 处死代理全家桶 (你已确认不需要)
+        # 代理全家桶
         sed -i '/CONFIG_PACKAGE_.*v2ray.*/d' .config
         sed -i '/CONFIG_PACKAGE_.*xray.*/d' .config
         sed -i '/CONFIG_PACKAGE_.*naiveproxy.*/d' .config
         sed -i '/CONFIG_PACKAGE_.*passwall.*/d' .config
         sed -i '/CONFIG_PACKAGE_.*ssr-plus.*/d' .config
         
-        # 6. 保活 LinkEase 
-        grep -q "CONFIG_PACKAGE_linkease" .config || echo "CONFIG_PACKAGE_linkease=y" >> .config
-        grep -q "CONFIG_PACKAGE_quickstart" .config || echo "CONFIG_PACKAGE_quickstart=y" >> .config
-        
         # 应用自定义脚本并整理依赖
         $GITHUB_WORKSPACE/$DIY_P2_SH
+        
+        # 最关键的一步：扩展成完整配置
         make defconfig
 
     - name: Download package
@@ -183,16 +179,23 @@ jobs:
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
+        # 尝试并发编译，失败则单线程再次尝试
         make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        
-        # 修复多行输出导致 ENV 崩溃的问题
-        TARGET_DEVICE=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | head -n 1)
-        TARGET_DEVICE=${TARGET_DEVICE//-/_}
-        [ -z "$TARGET_DEVICE" ] && TARGET_DEVICE="Generic"
-        
-        echo "DEVICE_NAME=_$TARGET_DEVICE" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+        # 注意：这里我们检查 Make 是否真的成功了
+        if [ $? -eq 0 ]; then
+          echo "status=success" >> $GITHUB_OUTPUT
+          
+          # 提取设备名
+          TARGET_DEVICE=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | head -n 1)
+          TARGET_DEVICE=${TARGET_DEVICE//-/_}
+          [ -z "$TARGET_DEVICE" ] && TARGET_DEVICE="Generic"
+          echo "DEVICE_NAME=_$TARGET_DEVICE" >> $GITHUB_ENV
+          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        else
+          echo "status=failure" >> $GITHUB_OUTPUT
+          exit 1
+        fi
 
     - name: Upload bin directory
       uses: actions/upload-artifact@v4
@@ -203,7 +206,8 @@ jobs:
 
     - name: Organize files
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      # ✅ 只有编译成功 status=success 时才运行 CD 命令，解决 No such file 错误
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled() && steps.compile.outputs.status == 'success'
       run: |
         # 强力清理不上传的文件，只留 sysupgrade.bin
         cd openwrt/bin/targets/*/*
@@ -223,7 +227,7 @@ jobs:
 
     - name: Generate release tag
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: env.UPLOAD_RELEASE == 'true' && steps.organize.outputs.status == 'success' && !cancelled()
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")_Pure" >> $GITHUB_OUTPUT
         touch release.txt
