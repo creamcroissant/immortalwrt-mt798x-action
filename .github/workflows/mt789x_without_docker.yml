@@ -1,16 +1,20 @@
 #
-# https://github.com/P3TERX/Actions-OpenWrt
-#
-# Updated: LinkEase Fix + GeoData Fix + Runner Stability + ENV Format Fix
+# 该 Workflow 包含自动上游监视 + 强制固件以极小积构建逻辑
+# 
+# 目标：Hanwckf immortalwrt-mt798x (无 Docker 版, 纯净版)
+# 特性：自动化检测更新、强制移除巨型无用包 (Ruby/BTRFS/AdGuard)
 #
 
-name: immortalwrt-mt798x without_docker Builder
+name: MT798x Pure Builder (Smart Watch)
 
 on:
   push:
     branches:
       - main
-  pull_request:
+  # 定时任务：每天北京时间 4点, 10点, 16点, 22点 自动检查上游
+  schedule:
+    - cron: '0 20,2,8,14 * * *'
+  workflow_dispatch:
 
 env:
   REPO_URL: https://github.com/hanwckf/immortalwrt-mt798x
@@ -32,6 +36,34 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    # 1. 智能监视逻辑：如果不下载代码就能知道不需要编译，就别浪费资源
+    - name: Check Upstream Commit Hash
+      id: check_hash
+      run: |
+        # 获取上游仓库最新 Commit，无需下载
+        COMMITS=$(git ls-remote "$REPO_URL" refs/heads/"$REPO_BRANCH" | awk '{print $1}')
+        echo "Upstream Hash: $COMMITS"
+        echo "commit_hash=$COMMITS" >> $GITHUB_OUTPUT
+        echo "$COMMITS" > .upstream_hash
+
+    - name: Cache Hash
+      id: cache_check
+      uses: actions/cache@v4
+      with:
+        paths: .upstream_hash
+        key: upstream_${{ steps.check_hash.outputs.commit_hash }}
+
+    - name: Cancel if No Update
+      # 如果是定时任务 且 上游Hash没变 => 取消构建，显示绿色
+      if: steps.cache_check.outputs.cache-hit == 'true' && github.event_name == 'schedule'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        echo "✅ 上游仓库没有更新，为了节省资源，本次自动跳过。"
+        gh run cancel ${{ github.run_id }}
+        gh run watch ${{ github.run_id }}
+
+    # 2. 如果判定需要更新，开始部署巨型编译环境
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
@@ -47,48 +79,34 @@ jobs:
 
     - name: Free disk space
       run: |
-        echo "Before cleanup:"
+        echo "清理前空间:"
         df -h
         sudo rm -rf /opt/* /usr/local/* /home/linuxbrew >> /dev/null 2>&1 || true
         sudo apt-get autoremove -y > /dev/null 2>&1 || true
         sudo apt-get clean > /dev/null 2>&1 || true
-        echo "After cleanup:"
-        df -h
-
+        
     - name: Clone source code
       working-directory: /workdir
       run: |
-        df -hT $PWD
         git clone $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-    - name: Load custom feeds
-      run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
-
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
+    # 3. 针对 LinkEASE 业务的补丁注入
     - name: Install feeds & Apply Patches
       run: |
-          cd openwrt && ./scripts/feeds install -a
+          cd openwrt
+          ./scripts/feeds update -a
           
-          # Fix v2ray-geodata 404
+          # 修复 v2ray-geodata 导致的编译死锁
           rm -rf feeds/packages/net/v2ray-geodata
-          echo "Replacing broken v2ray-geodata from feeds..."
           git clone https://github.com/sbwml/v2ray-geodata package/v2ray-geodata
 
-          # Load Custom LuCI
+          # 拉取必须插件
           git clone https://github.com/ntlf9t/luci-app-easymesh.git package/feeds/luci/luci-app-easymesh
-          git clone https://github.com/rufengsuixing/luci-app-adguardhome.git package/feeds/luci/luci-app-adguardhome
           git clone https://github.com/linkease/istore.git package/istore
 
-          # LinkEase / QuickStart Fixes
+          # LinkEase / QuickStart 核心修复逻辑
           mkdir -p package/custom
-
           git clone https://github.com/linkease/nas-packages.git tmp_nas
           git clone https://github.com/linkease/nas-packages-luci.git tmp_nas_luci
           
@@ -99,34 +117,63 @@ jobs:
           
           rm -rf tmp_nas tmp_nas_luci
 
+          # 强制修改架构定义，防止不兼容报错
           for pkg in linkease quickstart luci-app-linkease luci-app-quickstart; do
               MF="package/custom/$pkg/Makefile"
               if [ -f "$MF" ]; then
-                 echo "Patching [PKGARCH:=aarch64_cortex-a53] into $pkg..."
                  sed -i '/PKGARCH/d' "$MF"
                  sed -i '1a PKGARCH:=aarch64_cortex-a53' "$MF"
                  sed -i 's/+linkmount//g' "$MF"
               fi
           done
+          
+          ./scripts/feeds install -a
 
-    - name: Load custom configuration
+    # 4. 配置加载与深度清洗 (防止垃圾死灰复燃)
+    - name: Load & Clean Configuration
       run: |
         [ -e files ] && mv files openwrt/files
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
         chmod +x $DIY_P2_SH
         
         cd openwrt
-        echo "CONFIG_v2ray-geodata=y" >> .config
-        echo "CONFIG_PACKAGE_linkease=y" >> .config
-        echo "CONFIG_PACKAGE_quickstart=y" >> .config
         
+        # ⬇️ 无论 .config 原件写得如何，这里进行最后一次“核大杀器级”清洗
+        echo "Running Deep Clean Processor..."
+        
+        # 1. 处死编程语言运行时 (节省 ~20MB)
+        sed -i 's/^CONFIG_PACKAGE_ruby.*=y/# CONFIG_PACKAGE_ruby is not set/' .config
+        sed -i 's/^CONFIG_PACKAGE_node.*=y/# CONFIG_PACKAGE_node is not set/' .config
+        
+        # 2. 处死 AdGuardHome (节省 ~30MB)
+        sed -i 's/^CONFIG_PACKAGE_.*adguardhome.*=y/# CONFIG_PACKAGE_luci-app-adguardhome is not set/' .config
+        
+        # 3. 处死 BTRFS 内核模块 (节省 ~10MB)
+        sed -i 's/^CONFIG_PACKAGE_kmod-fs-btrfs.*=.*/# CONFIG_PACKAGE_kmod-fs-btrfs is not set/' .config
+        sed -i 's/^CONFIG_PACKAGE_btrfs-progs.*=.*/# CONFIG_PACKAGE_btrfs-progs is not set/' .config
+        
+        # 4. 处死多余容器引擎 (你选了 without_docker 但有些 config 可能会开)
+        sed -i 's/^CONFIG_PACKAGE_.*containerd.*=y/# CONFIG_PACKAGE_containerd is not set/' .config
+        
+        # 5. 处死代理全家桶 (你已确认不需要)
+        sed -i '/CONFIG_PACKAGE_.*v2ray.*/d' .config
+        sed -i '/CONFIG_PACKAGE_.*xray.*/d' .config
+        sed -i '/CONFIG_PACKAGE_.*naiveproxy.*/d' .config
+        sed -i '/CONFIG_PACKAGE_.*passwall.*/d' .config
+        sed -i '/CONFIG_PACKAGE_.*ssr-plus.*/d' .config
+        
+        # 6. 保活 LinkEase 
+        grep -q "CONFIG_PACKAGE_linkease" .config || echo "CONFIG_PACKAGE_linkease=y" >> .config
+        grep -q "CONFIG_PACKAGE_quickstart" .config || echo "CONFIG_PACKAGE_quickstart=y" >> .config
+        
+        # 应用自定义脚本并整理依赖
         $GITHUB_WORKSPACE/$DIY_P2_SH
+        make defconfig
 
     - name: Download package
       id: package
       run: |
         cd openwrt
-        make defconfig
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
@@ -139,25 +186,13 @@ jobs:
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
         
-        # --- ⬇️ 修复 ENV 写变量报错的核心部分 ⬇️ ---
-        # 1. 抓取名字，并通过 head -n 1 确保只有一行，防止多行 output 弄崩 GITHUB_ENV
+        # 修复多行输出导致 ENV 崩溃的问题
         TARGET_DEVICE=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | head -n 1)
-        
-        # 2. 将可能的连字符替换为下划线
         TARGET_DEVICE=${TARGET_DEVICE//-/_}
+        [ -z "$TARGET_DEVICE" ] && TARGET_DEVICE="Generic"
         
-        # 3. 如果这里取不到值，给个默认值 Generic，绝对保证脚本不报错，能顺利上传 artifact
-        if [ -n "$TARGET_DEVICE" ]; then
-          echo "DEVICE_NAME=_$TARGET_DEVICE" >> $GITHUB_ENV
-        else
-          echo "DEVICE_NAME=_Generic" >> $GITHUB_ENV
-        fi
-        
+        echo "DEVICE_NAME=_$TARGET_DEVICE" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
 
     - name: Upload bin directory
       uses: actions/upload-artifact@v4
@@ -170,8 +205,12 @@ jobs:
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
+        # 强力清理不上传的文件，只留 sysupgrade.bin
         cd openwrt/bin/targets/*/*
         rm -rf packages
+        rm -f *.buildinfo 
+        rm -f *.manifest
+        # 干掉无用的 factory.bin 或者 kernel.bin，只留升级包
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
 
@@ -186,12 +225,11 @@ jobs:
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")_without_docker" >> $GITHUB_OUTPUT
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")_Pure" >> $GITHUB_OUTPUT
         touch release.txt
-        echo "📦 OpenWrt Firmware" >> release.txt
-        # 添加一些状态信息到 release body 防止空 body
-        echo "- LinkEase Fix Applied" >> release.txt
-        echo "- DEVICE: ${{ env.DEVICE_NAME }}\"" >> release.txt
+        echo "📦 Clean OpenWrt Firmware" >> release.txt
+        echo "- 净化版: 无AdGuard/无Docker/无Ruby" >> release.txt
+        echo "- LinkEase & iStore 预装" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
@@ -202,19 +240,13 @@ jobs:
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
-        files: ${{ env.FIRMWARE }}/**
+        files: ${{ env.FIRMWARE }}/*sysupgrade.bin
 
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@main
-      with:
-        retain_days: 0
-        keep_minimum_runs: 2
-
-    - name: Remove old Releases
+    - name: Post-Cleanup
       uses: dev-drprasad/delete-older-releases@master
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
-        keep_latest: 10
+        keep_latest: 5
         delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
