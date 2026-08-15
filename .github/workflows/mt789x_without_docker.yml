@@ -17,8 +17,8 @@ on:
   workflow_dispatch:
 
 env:
-  REPO_URL: https://github.com/hanwckf/immortalwrt-mt798x
-  REPO_BRANCH: openwrt-21.02
+  REPO_URL: https://github.com/chasey-dev/immortalwrt-mt798x-rebase
+  REPO_BRANCH: 25.12
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: mt789x_without_docker.config
   DIY_P1_SH: diy-part1.sh
@@ -71,7 +71,7 @@ jobs:
       run: |
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
         sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zip diffutils
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
@@ -162,7 +162,15 @@ jobs:
         
         # 应用自定义脚本并整理依赖
         $GITHUB_WORKSPACE/$DIY_P2_SH
-        
+
+        # 25.12 (kernel 6.12, chasey-dev) 适配修复:
+        # 1) 设备符号: 21.02 的 mt7981_DEVICE_* 在 filogic 下丢失 → 改写为 filogic 设备符号
+        #    (cmcc_rax3000m 在 25.12 同时产出 NAND + eMMC 镜像)
+        sed -i 's/^CONFIG_TARGET_DEVICE_mediatek_mt7981_DEVICE_cmcc_rax3000m=y$/CONFIG_TARGET_mediatek_filogic_DEVICE_cmcc_rax3000m=y/' .config
+        sed -i 's/^CONFIG_TARGET_DEVICE_mediatek_mt7981_DEVICE_cmcc_rax3000m-emmc=y$/# CONFIG_TARGET_mediatek_mt7981_DEVICE_cmcc_rax3000m-emmc is not set/' .config
+        # 2) 包冲突: mtwifi-cfg 与 l1util 都安装 sbin/l1dat+sbin/l1util → 禁用 l1util
+        sed -i 's/^CONFIG_PACKAGE_l1util=y/# CONFIG_PACKAGE_l1util is not set/' .config
+
         # 最关键的一步：扩展成完整配置
         make defconfig
 
@@ -179,8 +187,8 @@ jobs:
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
-        # 尝试并发编译，失败则单线程再次尝试
-        make -j$(nproc) || make -j1 || make -j1 V=s
+        # 尝试并发编译，失败则单线程再次尝试 (FORCE_UNSAFE_CONFIGURE=1: Actions以root运行需绕过configure检查)
+        make -j$(nproc) FORCE_UNSAFE_CONFIGURE=1 || make -j1 FORCE_UNSAFE_CONFIGURE=1 || make -j1 V=s FORCE_UNSAFE_CONFIGURE=1
 
         # 注意：这里我们检查 Make 是否真的成功了
         if [ $? -eq 0 ]; then
@@ -244,7 +252,7 @@ jobs:
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*sysupgrade.bin
+        files: ${{ env.FIRMWARE }}/*sysupgrade*
 
     - name: Post-Cleanup
       uses: dev-drprasad/delete-older-releases@master
