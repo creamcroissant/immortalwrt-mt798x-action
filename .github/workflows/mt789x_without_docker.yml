@@ -171,10 +171,13 @@ jobs:
         #    (cmcc_rax3000m 在 25.12 同时产出 NAND + eMMC 镜像)
         sed -i 's/^CONFIG_TARGET_DEVICE_mediatek_mt7981_DEVICE_cmcc_rax3000m=y$/CONFIG_TARGET_mediatek_filogic_DEVICE_cmcc_rax3000m=y/' .config
         sed -i 's/^CONFIG_TARGET_DEVICE_mediatek_mt7981_DEVICE_cmcc_rax3000m-emmc=y$/# CONFIG_TARGET_mediatek_mt7981_DEVICE_cmcc_rax3000m-emmc is not set/' .config
-        # 2) 包冲突: mtwifi-cfg 与 l1util 都安装 sbin/l1dat+sbin/l1util → 禁用 l1util
-        sed -i 's/^CONFIG_PACKAGE_l1util=y/# CONFIG_PACKAGE_l1util is not set/' .config
 
         # 最关键的一步：扩展成完整配置
+        make defconfig
+
+        # 2) 包冲突: mtwifi-cfg 与 l1util 都安装 sbin/l1dat+sbin/l1util → 禁用 l1util
+        #    (l1util 是 defconfig 按依赖默认启用的, 必须在 defconfig 之后显式禁用再重新解析)
+        sed -i 's/^CONFIG_PACKAGE_l1util=y/# CONFIG_PACKAGE_l1util is not set/' .config
         make defconfig
 
     - name: Download package
