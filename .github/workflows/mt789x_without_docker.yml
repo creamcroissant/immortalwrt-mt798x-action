@@ -264,7 +264,9 @@ jobs:
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*sysupgrade* ${{ env.FIRMWARE }}/*initramfs*
+        files: |
+          ${{ env.FIRMWARE }}/*sysupgrade*
+          ${{ env.FIRMWARE }}/*initramfs*
 
     - name: Post-Cleanup
       uses: dev-drprasad/delete-older-releases@master
