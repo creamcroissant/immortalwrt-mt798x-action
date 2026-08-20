@@ -94,6 +94,11 @@ jobs:
     - name: Install feeds & Apply Patches
       run: |
           cd openwrt
+          
+          # 修复 netifd utils.uc handler_load 死循环 (ucode f.error/getline EOF bug → 100% CPU空转)
+          # 详见 patches/netifd-handler-load-eof-loop-fix.patch 与上游 issue (AI分析定位)
+          patch -p1 < "$GITHUB_WORKSPACE/patches/netifd-handler-load-eof-loop-fix.patch"
+          
           ./scripts/feeds update -a
           
           # 修复 v2ray-geodata 导致的编译死锁
